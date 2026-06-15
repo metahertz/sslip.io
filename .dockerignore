@@ -1,0 +1,19 @@
+# Keep the build context small & deterministic. Only Go sources, go.mod/go.sum,
+# and dashboard.html are needed to build.
+.git
+.github
+.gitignore
+.jsbeautifyrc
+bin
+data
+docs
+k8s
+profile
+revoked_ssl
+spec
+terraform
+*.md
+Docker
+docker-compose.yml
+.dockerignore
+Dockerfile

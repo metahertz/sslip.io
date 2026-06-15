@@ -56,6 +56,9 @@ func main() {
 	var public = flag.Bool("public", true, "allows resolution of public IP addresses. If false, only resolves private IPs including localhost (127/8, ::1), link-local (169.254/16, fe80::/10), CG-NAT (100.64/12), private (10/8, 172.16/12, 192.168/16, fc/7). Set to false if you don't want miscreants impersonating you via public IPs. If unsure, set to false")
 	var ptrDomain = flag.String("ptr-domain", "nip.io.", "the domain to use for PTR records, e.g. if 'nip.io',  127-0-0-1.nip.io.")
 	var dnstapSocket = flag.String("dnstap", "", `enables dnstap logging of queries that return an A or AAAA record; argument is the destination socket, either a Unix socket path (e.g. "/var/run/dnstap.sock") or a TCP address (e.g. "127.0.0.1:6000" or "[::1]:6000")`)
+	var dashboardAddr = flag.String("dashboard", "", `enables the stats dashboard HTTP server; argument is the bind address, e.g. ":8080" or "127.0.0.1:8080". Empty disables it`)
+	var geoipDB = flag.String("geoip", "", `path to a MaxMind GeoLite2-Country .mmdb file; enables the per-country breakdown in the dashboard. Empty disables country stats`)
+	var statsFile = flag.String("stats-file", "", `path to a JSON file used to persist dashboard stats across restarts (saved every minute). Empty keeps stats in-memory only`)
 	flag.Parse()
 	log.Printf("%s version %s starting", os.Args[0], xip.VersionSemantic)
 	log.Printf("blocklist URL: %s, name servers: %s, bind port: %d, quiet: %t",
@@ -65,6 +68,30 @@ func main() {
 	x.Public = *public
 	for _, logmessage := range logmessages {
 		log.Println(logmessage)
+	}
+
+	// Optional per-country stats via MaxMind GeoLite2 (graceful if absent)
+	if *geoipDB != "" {
+		lookerUpper, closer := openGeoIP(*geoipDB)
+		x.GeoIP = lookerUpper
+		if closer != nil {
+			defer closer()
+		}
+	}
+	// Optional persistence of dashboard stats across restarts
+	if *statsFile != "" {
+		loaded, err := xip.LoadStats(*statsFile)
+		if err != nil {
+			log.Printf("stats: warning: could not load %q: %v (starting fresh)", *statsFile, err)
+		} else {
+			x.Stats = loaded
+		}
+		log.Printf("stats: persisting dashboard stats to %q (every minute)", *statsFile)
+		go startStatsPersister(*statsFile, x, time.Minute)
+	}
+	// Optional stats dashboard HTTP server
+	if *dashboardAddr != "" {
+		go startDashboard(*dashboardAddr, x)
 	}
 
 	var dw *DnstapWriter

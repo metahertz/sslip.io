@@ -1,0 +1,40 @@
+# Runs the nsrecord.net DNS server + stats dashboard in one container.
+#
+#   cp example.env my.env        # then edit my.env (domain, nameservers, IPs)
+#   # point env_file: below at my.env, then:
+#   docker compose up --build -d
+#   dig +short 127.0.0.1.example.com @localhost   # DNS works
+#   open http://localhost:8080                     # dashboard (country stats baked in)
+#
+# Notes:
+#  - Settings come from the env file (see example.env for every variable).
+#  - The GeoLite2-Country DB is baked into the image at build time, so the
+#    per-country breakdown works with no extra setup.
+#  - Host port 53 is often taken by a local resolver (e.g. systemd-resolved).
+#    If `up` fails to bind, change the left-hand side to e.g. "5353:53/udp" and
+#    query with `dig ... @localhost -p 5353`.
+
+services:
+  nsrecord-dns:
+    build:
+      context: .
+      # Optional: build with the official MaxMind GeoLite2 source instead of the
+      # public mirror (requires a free MaxMind license key).
+      # args:
+      #   MAXMIND_LICENSE_KEY: "your-license-key"
+    image: nsrecord-dns-server
+    container_name: nsrecord-dns
+    restart: unless-stopped
+    # Load the DNS domain name + all settings from an env file.
+    env_file:
+      - example.env
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+      - "8080:8080/tcp"
+    volumes:
+      # Persist dashboard stats across restarts.
+      - ./data:/data
+      # Alternatively, mount your env file in directly (the entrypoint sources
+      # /config/nsrecord.env if present) instead of using env_file: above:
+      # - ./my.env:/config/nsrecord.env:ro

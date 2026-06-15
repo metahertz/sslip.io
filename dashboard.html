@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sslip.io DNS — Stats Dashboard</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    margin: 0; padding: 1.5rem; background: #0f1115; color: #e6e6e6;
+  }
+  h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
+  .muted { color: #8a93a2; font-size: 0.85rem; }
+  .cards { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1.25rem 0; }
+  .card {
+    background: #1a1d24; border: 1px solid #262a33; border-radius: 10px;
+    padding: 1rem 1.25rem; min-width: 160px;
+  }
+  .card .label { color: #8a93a2; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  .card .value { font-size: 1.7rem; font-weight: 600; margin-top: 0.25rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }
+  .panel { background: #1a1d24; border: 1px solid #262a33; border-radius: 10px; padding: 1rem 1.25rem; }
+  .panel h2 { font-size: 1rem; margin: 0 0 0.75rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid #262a33; }
+  th:last-child, td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+  td.flag { width: 1.5rem; }
+  canvas { max-height: 280px; }
+  .full { grid-column: 1 / -1; }
+  a { color: #6ea8fe; }
+  .err { color: #ff8080; }
+</style>
+</head>
+<body>
+  <h1>sslip.io DNS — Stats Dashboard</h1>
+  <div class="muted" id="subtitle">Loading…</div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Queries by type</h2>
+      <canvas id="typeChart"></canvas>
+      <table id="typeTable"></table>
+    </div>
+    <div class="panel">
+      <h2>Queries by country</h2>
+      <canvas id="countryChart"></canvas>
+      <table id="countryTable"></table>
+    </div>
+    <div class="panel full">
+      <h2>Queries per day</h2>
+      <canvas id="dayChart"></canvas>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script>
+    const regionNames = (() => {
+      try { return new Intl.DisplayNames(['en'], { type: 'region' }); } catch { return null; }
+    })();
+    function countryName(code) {
+      if (code === 'ZZ') return 'Unknown';
+      if (regionNames) { try { return regionNames.of(code) || code; } catch { return code; } }
+      return code;
+    }
+    // ISO 3166-1 alpha-2 -> regional-indicator flag emoji
+    function flag(code) {
+      if (!/^[A-Z]{2}$/.test(code) || code === 'ZZ') return '🏳️';
+      return String.fromCodePoint(...[...code].map(c => 0x1F1E6 + c.charCodeAt(0) - 65));
+    }
+    function fmt(n) { return n.toLocaleString(); }
+    function uptimeStr(s) {
+      s = Math.floor(s);
+      const d = Math.floor(s / 86400); s -= d * 86400;
+      const h = Math.floor(s / 3600); s -= h * 3600;
+      const m = Math.floor(s / 60);
+      return (d ? d + 'd ' : '') + (h ? h + 'h ' : '') + m + 'm';
+    }
+
+    const charts = {};
+    function drawChart(id, type, labels, data, opts = {}) {
+      if (typeof Chart === 'undefined') return; // CDN blocked: tables still render
+      const ctx = document.getElementById(id);
+      if (charts[id]) charts[id].destroy();
+      charts[id] = new Chart(ctx, {
+        type,
+        data: {
+          labels,
+          datasets: [{
+            label: 'queries',
+            data,
+            backgroundColor: type === 'line'
+              ? 'rgba(110,168,254,0.25)' : palette(data.length),
+            borderColor: type === 'line' ? '#6ea8fe' : '#11141a',
+            borderWidth: type === 'line' ? 2 : 1,
+            fill: type === 'line',
+            tension: 0.25,
+          }]
+        },
+        options: Object.assign({
+          responsive: true,
+          plugins: { legend: { display: type === 'doughnut', labels: { color: '#cfd6e0' } } },
+          scales: type === 'doughnut' ? {} : {
+            x: { ticks: { color: '#8a93a2' }, grid: { color: '#22262f' } },
+            y: { ticks: { color: '#8a93a2' }, grid: { color: '#22262f' }, beginAtZero: true },
+          },
+        }, opts),
+      });
+    }
+    function palette(n) {
+      const base = ['#6ea8fe','#52d1a4','#f6c453','#ef7d7d','#b78cf0','#4fd2e0','#f29ad0','#9bd45a','#f0935a','#7d8cf0'];
+      return Array.from({ length: n }, (_, i) => base[i % base.length]);
+    }
+
+    function table(id, rows, withFlags) {
+      let html = '<tr><th>' + (withFlags ? 'Country' : 'Type') + '</th><th>Queries</th></tr>';
+      for (const r of rows) {
+        if (withFlags) {
+          html += `<tr><td>${flag(r.key)} ${countryName(r.key)} <span class="muted">(${r.key})</span></td><td>${fmt(r.count)}</td></tr>`;
+        } else {
+          html += `<tr><td>${r.key.replace(/^Type/, '')}</td><td>${fmt(r.count)}</td></tr>`;
+        }
+      }
+      document.getElementById(id).innerHTML = html;
+    }
+
+    async function refresh() {
+      let s;
+      try {
+        const res = await fetch('stats.json', { cache: 'no-store' });
+        s = await res.json();
+      } catch (e) {
+        document.getElementById('subtitle').innerHTML = '<span class="err">Could not load stats.json</span>';
+        return;
+      }
+      document.getElementById('subtitle').textContent =
+        'Since ' + new Date(s.start).toLocaleString() + ' · refreshes every 10s';
+
+      document.getElementById('cards').innerHTML = `
+        <div class="card"><div class="label">Total queries</div><div class="value">${fmt(s.total)}</div></div>
+        <div class="card"><div class="label">Queries / sec</div><div class="value">${s.per_second.toFixed(2)}</div></div>
+        <div class="card"><div class="label">Uptime</div><div class="value">${uptimeStr(s.uptime_seconds)}</div></div>
+        <div class="card"><div class="label">Countries</div><div class="value">${fmt(s.by_country.length)}</div></div>
+      `;
+
+      const types = s.by_type || [];
+      drawChart('typeChart', 'doughnut', types.map(t => t.key.replace(/^Type/, '')), types.map(t => t.count));
+      table('typeTable', types, false);
+
+      const countries = (s.by_country || []).slice(0, 15);
+      drawChart('countryChart', 'bar', countries.map(c => c.key), countries.map(c => c.count),
+        { indexAxis: 'y', plugins: { legend: { display: false } } });
+      table('countryTable', s.by_country || [], true);
+
+      const days = s.by_day || [];
+      drawChart('dayChart', 'line', days.map(d => d.key), days.map(d => d.count));
+    }
+
+    refresh();
+    setInterval(refresh, 10000);
+  </script>
+</body>
+</html>

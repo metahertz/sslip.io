@@ -35,6 +35,28 @@ type Xip struct {
 	NameServers                 []dnsmessage.NSResource // The list of authoritative name servers (NS)
 	Public                      bool                    // Whether to resolve public IPs; set to false if security-conscious
 	PtrDomain                   string                  // The domain to use for PTR records, e.g. if "nip.io", `dig -x 127.0.0.1` will return "127-0-0-1.nip.io."
+	Stats                       *Stats                  // Usage stats powering the dashboard (per-type, per-country, per-day)
+	GeoIP                       CountryLookerUpper       // Optional GeoIP database for source-IP -> country; nil disables country stats
+}
+
+// CountryLookerUpper resolves a source IP address to an ISO 3166 country code
+// (e.g. "US"). It returns "" when the country is unknown. A *geoip2.Reader from
+// github.com/oschwald/geoip2-golang satisfies this via the geoIPAdapter in main.
+type CountryLookerUpper interface {
+	Country(net.IP) (string, error)
+}
+
+// lookupCountry returns the ISO country code for srcAddr, or "" if no GeoIP
+// database is configured or the lookup fails.
+func (x *Xip) lookupCountry(srcAddr net.IP) string {
+	if x.GeoIP == nil || srcAddr == nil {
+		return ""
+	}
+	code, err := x.GeoIP.Country(srcAddr)
+	if err != nil {
+		return ""
+	}
+	return code
 }
 
 // Metrics contains the counters of the important/interesting queries
@@ -227,7 +249,7 @@ type Response struct {
 
 // NewXip follows convention for constructors: https://go.dev/doc/effective_go#allocation_new
 func NewXip(blocklistURL string, nameservers []string, addresses []string, delegates []string, ptrDomain string) (x *Xip, logmessages []string) {
-	x = &Xip{Metrics: Metrics{Start: time.Now()}}
+	x = &Xip{Metrics: Metrics{Start: time.Now()}, Stats: NewStats()}
 
 	// Download the blocklist
 	logmessages = append(logmessages, x.downloadBlockList(blocklistURL))
@@ -409,6 +431,7 @@ func (x *Xip) QueryResponse(queryBytes []byte, srcAddr net.IP) (responseBytes []
 	response.Header.ID = queryHeader.ID
 	response.Header.RecursionDesired = queryHeader.RecursionDesired
 	x.Metrics.Queries++
+	x.Stats.Record(q.Type.String(), x.lookupCountry(srcAddr), time.Now().UTC().Format("2006-01-02"))
 
 	b := dnsmessage.NewBuilder(nil, response.Header)
 	b.EnableCompression()
