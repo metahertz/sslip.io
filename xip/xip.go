@@ -477,6 +477,15 @@ func (x *Xip) processQuestion(q dnsmessage.Question, srcAddr net.IP) (response R
 		response.Header.Authoritative = false
 		return x.NSResponse(q.Name, response, logMessage)
 	}
+	if _, prefixLabels, ok := EmbeddedIPDelegation(q.Name.String()); ok && !x.blocklist(q.Name.String()) {
+		// 2+ labels before the embedded IP: delegate every query type to the IP's
+		// nameserver. Exactly 1 label: keep resolving A/AAAA directly, but still
+		// answer an explicit NS query with the delegation (so "NS points to the IP").
+		if prefixLabels >= 2 || q.Type == dnsmessage.TypeNS {
+			response.Header.Authoritative = false
+			return x.NSResponse(q.Name, response, logMessage)
+		}
+	}
 	switch q.Type {
 	case dnsmessage.TypeA:
 		{
@@ -915,6 +924,45 @@ func IsAcmeChallenge(fqdnString string) bool {
 	return false
 }
 
+// EmbeddedIPDelegation reports whether fqdn has an embedded IP with one or more
+// labels in front of it. If so it returns the name rooted at the IP (e.g.
+// "example.192.168.0.1.nsrecord.net." -> "192.168.0.1.nsrecord.net.") and the
+// number of labels preceding the IP ("example" -> 1). These names are delegated
+// to a nameserver running at the embedded IP.
+func EmbeddedIPDelegation(fqdn string) (ipRootedName string, prefixLabels int, ok bool) {
+	lower := strings.ToLower(fqdn)
+	// Reverse-lookup zones (e.g. "...ip6.arpa.") are sequences of hex/decimal
+	// labels that the IPv4 regex would mistake for an embedded IP; never delegate them.
+	if strings.HasSuffix(lower, ".arpa.") || strings.HasSuffix(lower, ".arpa") {
+		return "", 0, false
+	}
+	bestStart := -1
+	// group 2 (loc[4]) is the IP in every one of these regexes — same convention
+	// used by String2IPv4 (FindStringSubmatch[2]) and NameToAAAA (FindSubmatch[2]).
+	for _, re := range []*regexp.Regexp{ipv4REDots, ipv4REDashes, ipv4REHex, ipv6RE, ipv6REHex} {
+		loc := re.FindStringSubmatchIndex(lower)
+		if loc == nil || len(loc) < 6 {
+			continue
+		}
+		if start := loc[4]; start >= 0 && (bestStart == -1 || start < bestStart) {
+			bestStart = start
+		}
+	}
+	if bestStart <= 0 { // no IP, or IP already at the start (no prefix)
+		return "", 0, false
+	}
+	ipRootedName = lower[bestStart:]
+	// Defensive: confirm it actually parses as an IP (reuse validated extractors).
+	if String2IPv4(ipRootedName) == nil && len(NameToAAAA(ipRootedName, true)) == 0 {
+		return "", 0, false
+	}
+	prefix := strings.TrimSuffix(lower[:bestStart], ".")
+	if prefix == "" {
+		return "", 0, false
+	}
+	return ipRootedName, strings.Count(prefix, ".") + 1, true
+}
+
 func IsDelegated(fqdnString string) bool {
 	fqdnStringLowerCased := strings.ToLower(fqdnString)
 	for domain := range Customizations {
@@ -950,6 +998,12 @@ func (x *Xip) NSResources(fqdnString string) []dnsmessage.NSResource {
 		x.Metrics.AnsweredNSDNS01ChallengeQueries++
 		strippedFqdn := dns01ChallengeRE.ReplaceAllString(fqdnStringLowerCased, "")
 		ns, _ := dnsmessage.NewName(strippedFqdn)
+		return []dnsmessage.NSResource{{NS: ns}}
+	}
+	// Embedded IP with a prefix? Delegate that subtree to a nameserver at the IP.
+	if ipRootedName, _, ok := EmbeddedIPDelegation(fqdnStringLowerCased); ok {
+		x.Metrics.AnsweredQueries++
+		ns, _ := dnsmessage.NewName(ipRootedName)
 		return []dnsmessage.NSResource{{NS: ns}}
 	}
 	x.Metrics.AnsweredQueries++

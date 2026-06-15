@@ -400,6 +400,47 @@ var _ = Describe("sslip.io-dns-server", func() {
 				})
 			})
 		})
+		When(`a name has labels in front of an embedded IP`, func() {
+			When(`it's an NS query with a single leading label`, func() {
+				It(`delegates to a nameserver rooted at the embedded IP, with glue`, func() {
+					digArgs = "@localhost example.192.168.0.1.sslip.io ns -p " + strconv.Itoa(port)
+					digCmd = exec.Command("dig", strings.Split(digArgs, " ")...)
+					digSession, err = Start(digCmd, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(digSession).Should(Say(`flags: qr rd; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 1`))
+					Eventually(digSession).Should(Say(`;; AUTHORITY SECTION:`))
+					Eventually(digSession).Should(Say(`example\.192\.168\.0\.1\.sslip\.io\.\s+604800\s+IN\s+NS\s+192\.168\.0\.1\.sslip\.io\.`))
+					Eventually(digSession).Should(Say(`;; ADDITIONAL SECTION:`))
+					Eventually(digSession).Should(Say(`192.168.0.1.sslip.io..*192.168.0.1\n`))
+					Eventually(digSession, 1).Should(Exit(0))
+					Eventually(string(serverSession.Err.Contents())).Should(MatchRegexp(`TypeNS example.192.168.0.1.sslip.io. \? nil, NS 192.168.0.1.sslip.io.\n`))
+				})
+			})
+			When(`it's an A query with a single leading label`, func() {
+				It(`still resolves directly to the embedded IP`, func() {
+					digArgs = "@localhost example.192.168.0.1.sslip.io a +short -p " + strconv.Itoa(port)
+					digCmd = exec.Command("dig", strings.Split(digArgs, " ")...)
+					digSession, err = Start(digCmd, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(digSession).Should(Say(`\A192.168.0.1\n\z`))
+					Eventually(digSession, 1).Should(Exit(0))
+					Eventually(string(serverSession.Err.Contents())).Should(MatchRegexp(`TypeA example.192.168.0.1.sslip.io. \? 192.168.0.1\n`))
+				})
+			})
+			When(`it's a non-NS query with two or more leading labels`, func() {
+				It(`delegates the whole subtree to a nameserver rooted at the embedded IP`, func() {
+					digArgs = "@localhost three.deep.192.168.0.1.sslip.io a -p " + strconv.Itoa(port)
+					digCmd = exec.Command("dig", strings.Split(digArgs, " ")...)
+					digSession, err = Start(digCmd, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(digSession).Should(Say(`flags: qr rd; QUERY: 1, ANSWER: 0, AUTHORITY: 1,`))
+					Eventually(digSession).Should(Say(`;; AUTHORITY SECTION:\n`))
+					Eventually(digSession).Should(Say(`three\.deep\.192\.168\.0\.1\.sslip\.io\.\s+604800\s+IN\s+NS\s+192\.168\.0\.1\.sslip\.io\.`))
+					Eventually(digSession, 1).Should(Exit(0))
+					Eventually(string(serverSession.Err.Contents())).Should(MatchRegexp(`TypeA three.deep.192.168.0.1.sslip.io. \? nil, NS 192.168.0.1.sslip.io.\n`))
+				})
+			})
+		})
 		When(`a TXT record for an "metrics.status.sslip.io" domain is repeatedly queried`, func() {
 			It("rate-limits the queries after some amount requests", func() {
 				// typically ~9 milliseconds / query, ~125 queries / sec on 4-core Xeon

@@ -149,6 +149,55 @@ var _ = Describe("Xip", func() {
 			})
 
 		})
+		When("the domain name has an embedded IP with one or more leading labels", func() {
+			var x, _ = xip.NewXip("file:///", []string{"ns-0.nsrecord.net."}, []string{}, []string{}, "")
+			It("delegates a single leading label to a nameserver rooted at the IP", func() {
+				ns := x.NSResources("example.192.168.0.1.nsrecord.net.")
+				Expect(len(ns)).To(Equal(1))
+				Expect(ns[0].NS.String()).To(Equal("192.168.0.1.nsrecord.net."))
+				aResources := xip.NameToA(ns[0].NS.String(), true)
+				Expect(len(aResources)).To(Equal(1))
+				Expect(aResources[0].A).To(Equal([4]byte{192, 168, 0, 1}))
+			})
+			It("delegates deep labels to the same IP-rooted nameserver", func() {
+				ns := x.NSResources("three.deep.example.192-168-0-1.nsrecord.net.")
+				Expect(len(ns)).To(Equal(1))
+				Expect(ns[0].NS.String()).To(Equal("192-168-0-1.nsrecord.net."))
+			})
+		})
+	})
+
+	Describe("EmbeddedIPDelegation()", func() {
+		It("returns the IP-rooted name and prefix-label count for a single leading label", func() {
+			name, prefixLabels, ok := xip.EmbeddedIPDelegation("example.192.168.0.1.foo.com.")
+			Expect(ok).To(BeTrue())
+			Expect(name).To(Equal("192.168.0.1.foo.com."))
+			Expect(prefixLabels).To(Equal(1))
+		})
+		It("counts multiple leading labels with the dash form", func() {
+			name, prefixLabels, ok := xip.EmbeddedIPDelegation("a.b.c.192-168-0-1.foo.com.")
+			Expect(ok).To(BeTrue())
+			Expect(name).To(Equal("192-168-0-1.foo.com."))
+			Expect(prefixLabels).To(Equal(3))
+		})
+		It("handles an embedded IPv6 address", func() {
+			name, prefixLabels, ok := xip.EmbeddedIPDelegation("example.2001-db8--1.foo.com.")
+			Expect(ok).To(BeTrue())
+			Expect(name).To(Equal("2001-db8--1.foo.com."))
+			Expect(prefixLabels).To(Equal(1))
+		})
+		It("returns ok==false when the IP has no leading labels", func() {
+			_, _, ok := xip.EmbeddedIPDelegation("192.168.0.1.foo.com.")
+			Expect(ok).To(BeFalse())
+		})
+		It("returns ok==false when there is no embedded IP", func() {
+			_, _, ok := xip.EmbeddedIPDelegation("foo.com.")
+			Expect(ok).To(BeFalse())
+		})
+		It("returns ok==false for reverse-lookup zones whose hex labels look like an IP", func() {
+			_, _, ok := xip.EmbeddedIPDelegation("2.a.b.b.4.0.2.9.a.e.e.6.e.c.4.1.0.a.3.e.3.0.1.8.5.4.6.0.1.0.6.2.ip6.arpa.")
+			Expect(ok).To(BeFalse())
+		})
 	})
 
 	Describe("SOAResource()", func() {
