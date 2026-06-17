@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/oschwald/geoip2-golang"
@@ -40,8 +41,9 @@ func openGeoIP(path string) (lookerUpper xip.CountryLookerUpper, closer func() e
 	return geoIPAdapter{reader: reader}, reader.Close
 }
 
-// startDashboard serves the stats UI ("/") and the JSON stats API
-// ("/stats.json") on addr. It blocks, so call it in a goroutine.
+// startDashboard serves the stats UI ("/"), the aggregate JSON stats API
+// ("/stats.json"), and the per-request drill-down API ("/requests.json") on
+// addr. It blocks, so call it in a goroutine.
 func startDashboard(addr string, x *xip.Xip) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +59,24 @@ func startDashboard(addr string, x *xip.Xip) {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(x.Stats.Snapshot())
+	})
+	// /requests.json returns the most recent individual requests, optionally
+	// filtered by ?type=TypeA and/or ?country=US, capped by ?limit (default 200).
+	mux.HandleFunc("/requests.json", func(w http.ResponseWriter, r *http.Request) {
+		limit := 200
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				if n > 2000 {
+					n = 2000
+				}
+				limit = n
+			}
+		}
+		reqs := x.Stats.RecentRequests(r.URL.Query().Get("type"), r.URL.Query().Get("country"), limit)
+		w.Header().Set("Content-Type", "application/json")
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(reqs)
 	})
 	srv := &http.Server{
 		Addr:              addr,

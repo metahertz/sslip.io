@@ -431,7 +431,7 @@ func (x *Xip) QueryResponse(queryBytes []byte, srcAddr net.IP) (responseBytes []
 	response.Header.ID = queryHeader.ID
 	response.Header.RecursionDesired = queryHeader.RecursionDesired
 	x.Metrics.Queries++
-	x.Stats.Record(q.Type.String(), x.lookupCountry(srcAddr), time.Now().UTC().Format("2006-01-02"))
+	x.Stats.Record(q.Type.String(), x.lookupCountry(srcAddr), time.Now().UTC().Format("2006-01-02"), q.Name.String(), srcAddr.String())
 
 	b := dnsmessage.NewBuilder(nil, response.Header)
 	b.EnableCompression()

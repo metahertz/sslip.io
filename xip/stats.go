@@ -12,10 +12,25 @@ import (
 // (no GeoIP database loaded, private/unroutable IP, or unmapped IP).
 const UnknownCountry = "ZZ"
 
+// recentCap is the number of most-recent individual requests kept in memory
+// (and persisted) so the dashboard can drill down from an aggregate into the
+// actual queries behind it. It's a ring buffer: older entries are overwritten.
+const recentCap = 5000
+
+// RequestEntry is a single recorded DNS query, used for the drill-down view.
+type RequestEntry struct {
+	Time    time.Time `json:"time"`
+	Type    string    `json:"type"`    // DNS query type, e.g. "TypeA"
+	Name    string    `json:"name"`    // queried domain name
+	IP      string    `json:"ip"`      // source IP of the requester
+	Country string    `json:"country"` // ISO 3166 country code of the source IP
+}
+
 // Stats holds the usage data powering the dashboard: a per-query-type
 // breakdown, a per-country breakdown, and a per-day time series. Unlike
 // Metrics (which is a copy-able struct of lock-free counters), Stats is
-// shared by pointer and is safe for concurrent use.
+// shared by pointer and is safe for concurrent use. It also keeps a bounded
+// ring buffer of the most recent individual requests for drill-down.
 type Stats struct {
 	mu        sync.Mutex
 	start     time.Time
@@ -23,6 +38,10 @@ type Stats struct {
 	byType    map[string]uint64 // DNS query type (e.g. "TypeA") -> count
 	byCountry map[string]uint64 // ISO 3166 country code (e.g. "US") -> count
 	byDay     map[string]uint64 // day bucket "2006-01-02" (UTC) -> count
+
+	recent      []RequestEntry // ring buffer, len == recentCap once full
+	recentHead  int            // index of the oldest entry
+	recentCount int            // number of valid entries (<= recentCap)
 }
 
 // NewStats returns an empty, ready-to-use Stats whose clock starts now.
@@ -32,14 +51,17 @@ func NewStats() *Stats {
 		byType:    map[string]uint64{},
 		byCountry: map[string]uint64{},
 		byDay:     map[string]uint64{},
+		recent:    make([]RequestEntry, recentCap),
 	}
 }
 
-// Record increments the counters for a single query. qType is the DNS query
-// type (e.g. "TypeA"), country is an ISO country code ("" is treated as
-// unknown), and day is a "2006-01-02" bucket. A nil *Stats is a no-op so the
-// rest of the server keeps working when stats are disabled.
-func (s *Stats) Record(qType, country, day string) {
+// Record increments the counters for a single query and appends it to the
+// recent-requests ring buffer. qType is the DNS query type (e.g. "TypeA"),
+// country is an ISO country code ("" is treated as unknown), day is a
+// "2006-01-02" bucket, name is the queried domain, and srcIP is the
+// requester's address. A nil *Stats is a no-op so the rest of the server keeps
+// working when stats are disabled.
+func (s *Stats) Record(qType, country, day, name, srcIP string) {
 	if s == nil {
 		return
 	}
@@ -52,6 +74,39 @@ func (s *Stats) Record(qType, country, day string) {
 	s.byType[qType]++
 	s.byCountry[country]++
 	s.byDay[day]++
+
+	entry := RequestEntry{Time: time.Now().UTC(), Type: qType, Name: name, IP: srcIP, Country: country}
+	idx := (s.recentHead + s.recentCount) % recentCap
+	s.recent[idx] = entry
+	if s.recentCount < recentCap {
+		s.recentCount++
+	} else {
+		s.recentHead = (s.recentHead + 1) % recentCap
+	}
+}
+
+// RecentRequests returns up to limit of the most recent requests, newest
+// first. If filterType or filterCountry is non-empty, only matching requests
+// are returned. A nil *Stats returns nil.
+func (s *Stats) RecentRequests(filterType, filterCountry string, limit int) []RequestEntry {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]RequestEntry, 0, limit)
+	// Walk from newest (head+count-1) back to oldest (head).
+	for i := s.recentCount - 1; i >= 0 && len(out) < limit; i-- {
+		e := s.recent[(s.recentHead+i)%recentCap]
+		if filterType != "" && e.Type != filterType {
+			continue
+		}
+		if filterCountry != "" && e.Country != filterCountry {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // CountStat is one (key, count) pair in a Snapshot.
@@ -127,6 +182,7 @@ type statsData struct {
 	ByType    map[string]uint64 `json:"by_type"`
 	ByCountry map[string]uint64 `json:"by_country"`
 	ByDay     map[string]uint64 `json:"by_day"`
+	Recent    []RequestEntry    `json:"recent,omitempty"` // oldest-first
 }
 
 // Save atomically writes the Stats to path as JSON (temp file + rename).
@@ -141,6 +197,7 @@ func (s *Stats) Save(path string) error {
 		ByType:    cloneMap(s.byType),
 		ByCountry: cloneMap(s.byCountry),
 		ByDay:     cloneMap(s.byDay),
+		Recent:    s.recentSliceLocked(),
 	}
 	s.mu.Unlock()
 	encoded, err := json.MarshalIndent(data, "", "  ")
@@ -182,7 +239,28 @@ func LoadStats(path string) (*Stats, error) {
 	if data.ByDay != nil {
 		s.byDay = data.ByDay
 	}
+	// Reload the recent-requests ring buffer (oldest-first on disk). Keep only
+	// the newest recentCap if an older file somehow had more.
+	for _, e := range data.Recent {
+		idx := (s.recentHead + s.recentCount) % recentCap
+		s.recent[idx] = e
+		if s.recentCount < recentCap {
+			s.recentCount++
+		} else {
+			s.recentHead = (s.recentHead + 1) % recentCap
+		}
+	}
 	return s, nil
+}
+
+// recentSliceLocked returns the ring buffer's entries in oldest-first order.
+// The caller must hold s.mu.
+func (s *Stats) recentSliceLocked() []RequestEntry {
+	out := make([]RequestEntry, 0, s.recentCount)
+	for i := 0; i < s.recentCount; i++ {
+		out = append(out, s.recent[(s.recentHead+i)%recentCap])
+	}
+	return out
 }
 
 func cloneMap(m map[string]uint64) map[string]uint64 {
